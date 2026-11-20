@@ -1,0 +1,7 @@
+# Workspace-managed configuration is not entry source.
+.agents/
+.codex/
+.aws/
+node_modules/
+*.log
+.DS_Store
