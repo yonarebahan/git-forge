@@ -224,15 +224,24 @@ function applyDelta(base: Buffer, delta: Buffer): Buffer {
 export const pkt = (value: string | Buffer): Buffer => {
   const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
   if (bytes.length > 65516) throw new Error('Packet too large');
-  return Buffer.concat([Buffer.from((bytes.length + 4).toString(16).padStart(4, '0')), bytes]);
+  const out = Buffer.allocUnsafe(bytes.length + 4);
+  out.write((bytes.length + 4).toString(16).padStart(4, '0'), 0, 'ascii');
+  bytes.copy(out, 4);
+  return out;
 };
 const flush = Buffer.from('0000'), delim = Buffer.from('0001');
 function packets(body: Buffer, stopAtFlush = false) {
   const lines: string[] = []; let p = 0;
   while (p < body.length) {
-    const hex = body.toString('ascii', p, p + 4);
-    if (!/^[0-9a-f]{4}$/i.test(hex)) throw new Error('Invalid packet length');
-    const n = parseInt(hex, 16); p += 4;
+    if (p + 4 > body.length) throw new Error('Invalid packet length');
+    let n = 0;
+    for (let i = 0; i < 4; i++) {
+      const c = body[p + i];
+      const d = c >= 48 && c <= 57 ? c - 48 : c >= 97 && c <= 102 ? c - 87 : c >= 65 && c <= 70 ? c - 55 : -1;
+      if (d < 0) throw new Error('Invalid packet length');
+      n = n * 16 + d;
+    }
+    p += 4;
     if (n === 0) { if (stopAtFlush) break; continue; }
     if (n === 1 || n === 2) continue;
     if (n < 4 || p + n - 4 > body.length) throw new Error('Truncated packet');
@@ -245,14 +254,17 @@ function sideband(data: Buffer): Buffer[] {
   for (let p = 0; p < data.length; p += 65000) out.push(pkt(Buffer.concat([Buffer.from([1]), data.subarray(p, p + 65000)])));
   return out;
 }
+/** The protocol-v2 advertisement and the per-service header packet never change: build them once. */
+const V2_ADVERTISEMENT = Buffer.concat(['version 2\n', 'agent=git-forge/1\n', 'ls-refs=unborn\n', 'fetch=shallow\n', 'object-format=sha1\n'].map(pkt).concat(flush));
+const SERVICE_HEADER: Record<string, Buffer> = { 'git-upload-pack': pkt('# service=git-upload-pack\n'), 'git-receive-pack': pkt('# service=git-receive-pack\n') };
 export function advertise(git: GitStore, service: string, v2: boolean): Buffer {
-  if (service === 'git-upload-pack' && v2) return Buffer.concat(['version 2\n', 'agent=git-forge/1\n', 'ls-refs=unborn\n', 'fetch=shallow\n', 'object-format=sha1\n'].map(pkt).concat(flush));
+  if (service === 'git-upload-pack' && v2) return V2_ADVERTISEMENT;
   const receive = service === 'git-receive-pack';
   const caps = receive ? 'report-status side-band-64k delete-refs ofs-delta agent=git-forge/1' : `multi_ack_detailed side-band-64k thin-pack ofs-delta shallow symref=HEAD:refs/heads/${git.defaultBranch} agent=git-forge/1`;
   const refs = [...git.refs].sort(([a], [b]) => a < b ? -1 : 1);
   const head = git.resolve();
   if (!receive && head) refs.unshift(['HEAD', head]);
-  const lines: Buffer[] = [pkt(`# service=${service}\n`), flush];
+  const lines: Buffer[] = [SERVICE_HEADER[service], flush];
   if (!refs.length) lines.push(pkt(`${ZERO} capabilities^{}\0${caps}\n`));
   refs.forEach(([name, id], i) => {
     lines.push(pkt(`${id} ${name}${i === 0 ? `\0${caps}` : ''}\n`));

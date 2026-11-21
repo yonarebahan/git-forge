@@ -33,12 +33,43 @@ export class Store {
   repos = new Map<string, Repository>();
   nextRepo = 1;
   clock = 0;
+  /** Bumped whenever an existing issue object is mutated, so cached serializations stay trustworthy. */
+  serial = 0;
+  jsonCache = new WeakMap<Json, { serial: number, buf: Buffer }>();
   now(): string { return new Date(1735689600000 + this.clock++ * 1000).toISOString(); }
   epoch(): number { return 1735689600 + this.clock++; }
   repo(owner: string, name: string): Repository {
     const repo = owner === this.owner ? this.repos.get(name) : undefined;
     if (!repo) throw new ApiError(404, 'Not Found');
     return repo;
+  }
+  /** Serialized body of one pure issue, reused while no issue has been mutated (see serial). */
+  issueBuffer(issue: Json): Buffer {
+    const hit = this.jsonCache.get(issue);
+    if (hit && hit.serial === this.serial) return hit.buf;
+    const buf = Buffer.from(JSON.stringify(issue));
+    this.jsonCache.set(issue, { serial: this.serial, buf });
+    return buf;
+  }
+  /** GET /api/v3/repos/{owner}/{repo}/issues/{number} for a pure issue, or null to use the generic router. */
+  issueGetBuffer(path: string): Buffer | null {
+    const parts = path.split('/');
+    if (parts.length !== 8 || parts[1] !== 'api' || parts[2] !== 'v3' || parts[3] !== 'repos' || parts[6] !== 'issues') return null;
+    let name: string;
+    try { if ((parts[4].includes('%') ? decodeURIComponent(parts[4]) : parts[4]) !== this.owner) return null; name = parts[5].includes('%') ? decodeURIComponent(parts[5]) : parts[5]; } catch { return null; }
+    const repo = this.repos.get(name); if (!repo) return null;
+    const number = Number(parts[7]); if (!Number.isInteger(number)) return null;
+    const issue = repo.issues.get(number); if (!issue) return null;
+    return this.issueBuffer(issue);
+  }
+  /** POST /api/v3/repos/{owner}/{repo}/issues, or null to use the generic router. */
+  issueCreate(path: string, input: Json): Json | null {
+    const parts = path.split('/');
+    if (parts.length !== 7 || parts[1] !== 'api' || parts[2] !== 'v3' || parts[3] !== 'repos' || parts[6] !== 'issues') return null;
+    let name: string;
+    try { if ((parts[4].includes('%') ? decodeURIComponent(parts[4]) : parts[4]) !== this.owner) return null; name = parts[5].includes('%') ? decodeURIComponent(parts[5]) : parts[5]; } catch { return null; }
+    const repo = this.repos.get(name); if (!repo) return null;
+    return this.createIssue(repo, input);
   }
   createRepo(input: Json): Repository {
     need(typeof input.name === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(input.name));
@@ -74,6 +105,7 @@ export class Store {
     for (const field of ['title', 'body']) if (typeof input[field] === 'string') issue[field] = input[field];
     if (input.state !== undefined) { need(['open', 'closed'].includes(input.state)); issue.state = input.state; issue.closed_at = input.state === 'closed' ? this.now() : null; }
     issue.updated_at = this.now();
+    this.serial++;
     return issue;
   }
   listIssues(repo: Repository, state = 'open', direction = 'desc'): Json[] {
@@ -85,6 +117,7 @@ export class Store {
     const comment = { id, node_id: gid('IssueComment', repo.id, id), body, user: this.user, created_at: now, updated_at: now };
     const comments = repo.comments.get(number) ?? []; comments.push(comment); repo.comments.set(number, comments);
     issue.comments = comments.length; issue.updated_at = now;
+    this.serial++;
     return comment;
   }
   createPull(repo: Repository, input: Json): Json {
