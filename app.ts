@@ -39,7 +39,7 @@ export function createApp() {
   const store = new Store();
   const expectedAuth = process.env.MAKEFUN_SHOP_TOKEN ? `Bearer ${process.env.MAKEFUN_SHOP_TOKEN}` : null;
   let requestId = 0;
-  const server = createServer({ keepAliveTimeout: 60_000, requestTimeout: 30_000 }, async (req, res) => {
+  const server = createServer({ keepAliveTimeout: 60_000, requestTimeout: 0 }, async (req, res) => {
     res.setHeader('X-GitHub-Request-Id', (++requestId).toString(16).padStart(12, '0'));
     try {
       const method = req.method ?? 'GET';
